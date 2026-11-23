@@ -14,6 +14,16 @@
     "logs_dir": "logs",
     "recordings_dir": "recordings"
   },
+  "ball": {
+    "_comment": "Built-in profile of your ball (cream/black cloth basketball) so it is recognised before ball calibration; your own calibration (B) is added on top. room_learning teaches the model what your room looks like while it runs.",
+    "profile": "models/ball_profiles/veidoorn_cream_black.json",
+    "use_profile": true,
+    "profile_with_calibration": true,
+    "room_learning": true,
+    "room_learning_start_s": 1.5,
+    "room_learning_interval_s": 6.0,
+    "room_learning_patches_per_frame": 6
+  },
   "geometry": {
     "_comment": "Real sizes are only used for the initial guess of how big the ball looks at the rim; HoopVision then learns it from your own makes.",
     "rim_inner_diameter_cm": 23.0,
@@ -37,6 +47,9 @@
     "hoop_roi_upscale_below_px": 220,
     "init_score": 0.4,
     "track_score": 0.33,
+    "track_min_motion_evidence": 0.25,
+    "track_min_appearance_evidence": 0.3,
+    "track_size_jump_min_appearance": 0.5,
     "min_motion_for_init": 0.2,
     "min_appearance_for_init": 0.2,
     "static_circle_seconds": 2.0,
@@ -100,7 +113,10 @@
     "top_exit_max_offset_frac": 0.35,
     "top_exit_window_s": 0.5,
     "min_window_obs_fraction": 0.5,
-    "rebound_fall_speed_rim_w_s": 4.0
+    "rebound_fall_speed_rim_w_s": 4.0,
+    "min_track_age_s": 0.25,
+    "hands_to_hoop_max_s": 1.6,
+    "hoop_fallback_max_size": 1.9
   },
   "outcome": {
     "max_crossing_gap_s": 0.45,

@@ -10,7 +10,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import synth  # noqa: E402
-from ball_model import BallModel  # noqa: E402
+from ball_model import BallModel, load_ball_model  # noqa: E402
 from calibration import HoopCalibration, gray_thumb  # noqa: E402
 from camera import Frame  # noqa: E402
 from hoopconfig import load_config  # noqa: E402
@@ -48,11 +48,25 @@ def ball_model() -> BallModel:
     return m
 
 
-def run(sims, cfg_overrides: dict | None = None, fps: float = 30.0, warmup_s: float = 1.0, seed: int = 1, calibrated_ball: bool = True, duration: float | None = None, **render_kw):
+def make_ball_model(kind: str, cfg: dict) -> BallModel:
+    """'calibrated': simulated B-key calibration + the built-in profile (what main.py loads after
+    calibration); 'profile': the built-in profile only (never calibrated); 'none': generic prior."""
+    if kind == "none":
+        return BallModel()
+    no_user = dict(cfg, paths=dict(cfg["paths"], ball_model=os.path.join(os.path.dirname(__file__), "_no_calibration.json")))
+    prof = load_ball_model(no_user)
+    if kind == "profile":
+        return prof
+    m = ball_model()
+    return BallModel(positives=list(m.positives), negatives=list(m.negatives)).merged_with_profile(prof, prof.profile_name)
+
+
+def run(sims, cfg_overrides: dict | None = None, fps: float = 30.0, warmup_s: float = 1.0, seed: int = 1, calibrated_ball: bool = True, duration: float | None = None,
+        ball: str | None = None, **render_kw):
     """Returns (pipeline, events, frame_results). A short static warm-up lets the background model settle."""
     cfg = load_config(overrides=cfg_overrides or {})
     cal = calibration()
-    pipe = Pipeline(cfg, cal, ball_model() if calibrated_ball else BallModel())
+    pipe = Pipeline(cfg, cal, make_ball_model(ball or ("calibrated" if calibrated_ball else "none"), cfg))
     bg = synth.background()
     events: list[dict] = []
     results = []

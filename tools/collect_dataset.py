@@ -27,9 +27,9 @@ import numpy as np
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
-from ball_model import BallModel  # noqa: E402
+from ball_model import BallModel, load_ball_model  # noqa: E402
 from camera import CameraSource, VideoSource  # noqa: E402
-from hoopconfig import load_config, resolve_path  # noqa: E402
+from hoopconfig import load_config  # noqa: E402
 
 DEFAULT_DIR = os.path.join(ROOT, "dataset")
 
@@ -84,7 +84,7 @@ def annotate(args) -> None:
     if not imgs:
         print("No images. Run the capture command first.")
         return
-    model = BallModel.load(resolve_path(load_config()["paths"]["ball_model"]))
+    model = load_ball_model(load_config())
     i = next((k for k, p in enumerate(imgs) if not os.path.exists(os.path.splitext(p)[0] + ".txt")), 0)
     win = "HoopVision annotate"
     state = {"p0": None, "box": None}

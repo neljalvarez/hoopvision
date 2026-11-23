@@ -51,6 +51,7 @@ class ShotAttemptDetector:
         self.pending_r0 = 0.0
         self.pending_rmin = 0.0
         self._top_checked: int | None = None
+        self.last_in_hands_t = -1e9
 
     def set_ellipse(self, e: Ellipse) -> None:
         self.e = e
@@ -88,6 +89,8 @@ class ShotAttemptDetector:
         if st is None:
             return self._confirm_lost(t)
         self.lost_since = None
+        if st.observed and st.r >= float(self.cfg["rearm_radius_factor"]) * self.rim_r() and self.e.to_local(st.x, st.y)[1] >= 0:
+            self.last_in_hands_t = t  # big and not above the rim: in the hands, near the camera
         if not self.armed or t < self.cooldown_until:
             self.pending = None
             return None
@@ -96,9 +99,17 @@ class ShotAttemptDetector:
             return self._follow_pending(st, t, frame_size)
         if not st.observed:
             return self._left_through_top(st, t, frame_size)
+        sig = self._appeared_above_rim(st, t)
+        if sig is not None:
+            return sig
         self._top_checked = None
         recent = [p for p in st.history if t - p.t <= float(cfg["max_window_s"])]
         pts = [p for p in recent if p.observed]
+        # the first observations of a new track (ball entering the view together with an arm,
+        # first size estimates) are unreliable: a release must start after the track settled
+        born = st.history[0].t if st.history else t
+        settle = float(cfg.get("min_track_age_s", 0.25))
+        pts = [p for p in pts if p.t >= born + settle]
         n_min = int(cfg["min_window_obs"])
         if len(pts) < n_min:
             return None
@@ -165,6 +176,24 @@ class ShotAttemptDetector:
             if b.t > a.t and (b.y - a.y) / (b.t - a.t) > float(self.cfg.get("rebound_fall_speed_rim_w_s", 4.0)) * W:
                 return True
         return False
+
+    def _appeared_above_rim(self, st: TrackState, t: float) -> AttemptSignal | None:
+        """Fallback when the release itself was not tracked (fast, blurred, hidden by the arm):
+        the ball was in the hands a moment ago and is now seen above the rim, at about the size
+        of a ball at the rim's depth (up to ~2x: still on its way). Only a throw gets there that fast."""
+        cfg = self.cfg
+        if t - self.last_in_hands_t > float(cfg.get("hands_to_hoop_max_s", 1.6)):
+            return None
+        u, v = self.e.to_local(st.x, st.y)
+        rr = self.rim_r()
+        if not (abs(u) <= 2.0 * self.e.a and v < -self.e.b and 0.6 * rr <= st.r <= float(cfg.get("hoop_fallback_max_size", 1.9)) * rr):
+            return None
+        obs = [p for p in st.history if p.observed and t - p.t <= 0.3]
+        if len(obs) < 2 or not self._moving_evidence(obs):
+            return None
+        feats = {"since_hands_s": round(float(t - self.last_in_hands_t), 2), "r": round(float(st.r), 1), "rim_depth_r": round(float(rr), 1)}
+        return AttemptSignal(self.last_in_hands_t, t, "reached-hoop",
+                             [f"Ball left your hands and was seen above the rim {t - self.last_in_hands_t:.1f} s later"], feats, list(obs))
 
     def _left_through_top(self, st: TrackState, t: float, frame_size) -> AttemptSignal | None:
         """A fast, high release often leaves the top of the frame within 2-4 frames, too soon for

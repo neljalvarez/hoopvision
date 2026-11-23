@@ -59,6 +59,30 @@ def test_non_shots_are_not_counted(name):
     assert harness.attempts(ev) == [] and harness.outcomes(ev) == [], harness.describe(ev)
 
 
+PROFILE_ONLY = {
+    "swish": (lambda: S.shot((0, 0, 0), 0.8), "make"),
+    "rim bounces then in": (S.rim_in, "make"),
+    "miss right": (lambda: S.side_miss(1), "miss"),
+    "airball short": (S.airball_short, "miss"),
+}
+
+
+@pytest.mark.parametrize("name", list(PROFILE_ONLY))
+def test_built_in_ball_profile_without_any_calibration(name):
+    """The user has not run ball calibration (B): the built-in profile of their ball + live room
+    learning must be enough."""
+    make_sim, expected = PROFILE_ONLY[name]
+    _, ev, _ = harness.run([make_sim()], ball="profile")
+    assert len(harness.attempts(ev)) == 1, harness.describe(ev)
+    assert harness.outcomes(ev) == [expected], harness.describe([e for e in ev if e["type"] != "state"])
+
+
+@pytest.mark.parametrize("name", ["holding", "dribble", "catch"])
+def test_built_in_profile_non_shots(name):
+    _, ev, _ = harness.run([getattr(S, name)()], ball="profile")
+    assert harness.attempts(ev) == [] and harness.outcomes(ev) == [], harness.describe(ev)
+
+
 def test_uncalibrated_ball_still_tracks_with_the_black_and_white_prior():
     _, ev, _ = harness.run([S.shot((0, 0, 0), 0.8)], calibrated_ball=False)
     assert harness.outcomes(ev) == ["make"]

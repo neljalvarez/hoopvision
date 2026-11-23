@@ -30,7 +30,7 @@ import cv2
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
-from ball_model import BallModel  # noqa: E402
+from ball_model import load_ball_model  # noqa: E402
 from calibration import HoopCalibration  # noqa: E402
 from camera import VideoSource  # noqa: E402
 from hoopconfig import load_config, resolve_path  # noqa: E402
@@ -105,7 +105,7 @@ def run_engine(video: str, cfg: dict) -> tuple[list[dict], list[dict]]:
     cal = HoopCalibration.load(resolve_path(cfg["paths"]["hoop_calibration"]))
     if cal is None or not cal.aspect_matches(w, h):
         raise SystemExit("No hoop calibration for this video's resolution. Run: python main.py --video <file> --calibrate")
-    pipe = Pipeline(cfg, cal.scaled_to(w, h), BallModel.load(resolve_path(cfg["paths"]["ball_model"])))
+    pipe = Pipeline(cfg, cal.scaled_to(w, h), load_ball_model(cfg))
     attempts, results = [], []
     f = first
     last_t = first.t

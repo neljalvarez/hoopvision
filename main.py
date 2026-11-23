@@ -25,7 +25,7 @@ import time
 import cv2
 
 from audio import Audio
-from ball_model import BallModel, run_ball_calibration
+from ball_model import load_ball_model, run_ball_calibration
 from calibration import HoopCalibration, HoopCalibrator
 from camera import CameraSource, Recorder, VideoSource
 from hoopconfig import load_config, resolve_path
@@ -140,7 +140,7 @@ def main(argv=None) -> int:
     print(f"[source] {'video ' + args.video if args.video else 'camera'} {w}x{h} @ {source.nominal_fps:.0f} fps")
 
     ball_path = resolve_path(cfg["paths"]["ball_model"])
-    ball_model = BallModel.load(ball_path)
+    ball_model = load_ball_model(cfg)
     cal = load_calibration(cfg, w, h)
 
     if args.headless:
@@ -162,7 +162,7 @@ def main(argv=None) -> int:
     if args.calibrate_ball:
         m = run_ball_calibration(source, ball_path, resolve_path(cfg["paths"]["ball_samples_dir"]))
         if m is not None:
-            ball_model = m
+            ball_model = load_ball_model(cfg)
     if cal is None or args.calibrate:
         print("[calibration] click LEFT, RIGHT, FRONT and BACK of the rim opening; ENTER to save")
         cal = calibrate_hoop(source.read().image if not args.video else first.image, cal, cfg)
@@ -178,8 +178,11 @@ def main(argv=None) -> int:
     cv2.resizeWindow(win, min(1600, w), min(900, h))
 
     ui = {"debug": bool(cfg["ui"]["show_debug"]), "tracking": True, "fps": 0.0, "notification": None, "recording": False, "scale": cfg["ui"]["scoreboard_scale"]}
-    if not ball_model.calibrated:
-        ui["banner"] = "Tip: press B to calibrate YOUR ball (much more reliable)"
+    if ball_model.profile_name:
+        print(f"[ball] built-in profile: {ball_model.profile_name}" + (" + your calibration" if ball_model.user_calibrated else ""))
+    if not ball_model.user_calibrated:
+        ui["banner"] = ("Using the built-in ball profile - press B to calibrate with your camera for best accuracy"
+                        if ball_model.profile_name else "Tip: press B to calibrate YOUR ball (much more reliable)")
     notify_until = 0.0
     fps_hist: collections.deque = collections.deque(maxlen=30)
     history: collections.deque = collections.deque(maxlen=300)  # rendered frames for stepping back (video)
@@ -272,7 +275,7 @@ def main(argv=None) -> int:
             else:
                 m = run_ball_calibration(source, ball_path, resolve_path(cfg["paths"]["ball_samples_dir"]))
                 if m is not None:
-                    pipe.ball_model = pipe.detector.ball_model = pipe.engine.ball_model = m
+                    pipe.set_ball_model(load_ball_model(cfg))
                     ui.pop("banner", None)
         elif ch == "v":
             if recorder is None:

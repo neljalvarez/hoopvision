@@ -242,6 +242,7 @@ class BallDetector:
                 # near the hoop the ball is far from the camera: its expected size is known
                 c.prior = float(math.exp(-((math.log(c.r / self.rim_radius) / 0.35) ** 2)))
             out.append(c)
+        out = self._suppress_inner_patterns(out)
         timings["score"] = (time.perf_counter() - t5) * 1000
         self.frame_index += 1
         return DetectionResult(out, fg, roi, hoop_fg, net_motion, timings)
@@ -392,7 +393,7 @@ class BallDetector:
     def _hough_near(self, gray: np.ndarray, pred: Prediction) -> list[Candidate]:
         half = max(pred.search, pred.r * 2.5)
         roi = (int(pred.x - half), int(pred.y - half), int(2 * half), int(2 * half))
-        return self._hough(gray, roi, max(3, int(pred.r * 0.55)), max(6, int(pred.r * 1.6)), "hough", max_n=4)
+        return self._hough(gray, roi, max(3, int(pred.r * 0.55)), max(6, int(pred.r * 1.6)), "hough", max_n=8)
 
     def _net_motion(self, hoop_fg: np.ndarray, roi) -> float:
         """Fraction of zone C (the net) that is moving — optional supporting evidence for a make."""
@@ -426,6 +427,22 @@ class BallDetector:
             else:
                 out.append(c)
         return out[:40]
+
+    @staticmethod
+    def _suppress_inner_patterns(cands: list[Candidate]) -> list[Candidate]:
+        """The ball's black logo panel and black caps are circles INSIDE the ball. When a larger
+        circle around it looks at least as much like the ball, the inner one is part of the ball's
+        pattern, not the ball (otherwise the measured size jumps while the ball is held)."""
+        keep = []
+        for c in cands:
+            inner = any(
+                o is not c and o.r >= 1.25 * c.r and math.hypot(c.x - o.x, c.y - o.y) + c.r <= o.r * 1.05
+                and o.appearance >= max(0.4, c.appearance)
+                for o in cands
+            )
+            if not inner:
+                keep.append(c)
+        return keep
 
     @staticmethod
     def _suppress_nested(cands: list[Candidate]) -> list[Candidate]:

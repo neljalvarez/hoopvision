@@ -217,3 +217,20 @@ def test_rebound_off_the_floor_toward_the_rim_is_not_an_attempt():
 def test_positions_without_any_motion_evidence_do_not_start_an_attempt():
     f = Feed(engine(), source="hough").run(hold(30) + flight_to((480, 60), n=12)).idle()
     assert f.attempts == []
+
+
+def test_release_missed_but_ball_seen_above_the_rim_soon_after_is_an_attempt():
+    # held near the camera, then the release is not tracked (hidden/blurred): the ball is next
+    # seen as a new track just above the rim at rim-depth size, falling through
+    f = Feed(engine()).run(hold(30)).run([None] * 12)
+    f.hist = []
+    f.run([(482, 40 + 14 * i, 35) for i in range(6)] + down_through()).idle()
+    assert len(f.attempts) == 1 and f.attempts[0]["kind"] == "reached-hoop"
+    assert f.outcomes == ["make"]
+
+
+def test_ball_above_the_rim_long_after_it_left_the_hands_is_not_an_attempt():
+    f = Feed(engine()).run(hold(30)).run([None] * 90)  # 3 s later
+    f.hist = []
+    f.run([(482, 40 + 14 * i, 35) for i in range(6)]).idle()
+    assert f.attempts == []

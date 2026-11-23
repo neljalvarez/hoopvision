@@ -354,6 +354,9 @@ class ShotOutcomeClassifier:
                 u, v = e.to_local(last.x, last.y)
                 if v > e.b + last.r and abs(u) > 1.1 * e.a and t - self.last_rim_t >= settle:
                     return self._miss(t, "Ball was falling away from the rim when it was lost")
+            if c is None and self.front_pass:
+                # the only crossings seen were clearly in front of the rim (too big to be at its depth)
+                return self._miss(t, "Ball dropped in front of the rim, then was lost")
             why = "Ball went through the opening but was not confirmed inside the net" if c is not None else "Lost the ball before the outcome was clear"
             return self._finish("uncertain", 0.3, t, [why] + self.rejected[-2:], {"lost_for_s": round(lost_for, 2), "reached_rim": self.reached_rim})
         return None

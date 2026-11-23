@@ -2,7 +2,8 @@
 
 * Background = the user's reference photo with the ball, hand and red annotations inpainted.
 * Camera intrinsics/pitch are fitted so the simulated rim projects exactly onto the real rim.
-* The ball is a rendered sphere with a black-and-white seam pattern that spins, with motion blur.
+* The ball is a rendered sphere of the user's ball (cream with black stripes and logo panels,
+  ball_texture.py) that spins, with motion blur.
 * Physics: gravity, rim (torus) collisions, wall bounces, net drag, floor bounces.
 * Occlusion: the photo's dark rim and coloured net strings are drawn over a ball inside the hoop.
 * An arm holds the ball before release; Gaussian sensor noise is added.
@@ -18,6 +19,8 @@ from dataclasses import dataclass, field
 import cv2
 import numpy as np
 from scipy.optimize import least_squares
+
+import ball_texture
 
 REF = os.path.join(os.path.dirname(__file__), "fixtures", "room_reference.png")
 W, H = 960, 672
@@ -145,29 +148,8 @@ def _rot(axis: np.ndarray, ang: float) -> np.ndarray:
 
 
 def render_ball(canvas: np.ndarray, u: float, v: float, r: float, R: np.ndarray, weight: float = 1.0, acc: np.ndarray | None = None) -> None:
-    """Draw a spinning white ball with thick black seams and black caps (like the user's ball)."""
-    x0, x1 = int(max(0, u - r - 1)), int(min(W, u + r + 2))
-    y0, y1 = int(max(0, v - r - 1)), int(min(H, v + r + 2))
-    if x1 <= x0 or y1 <= y0 or r < 1:
-        return
-    yy, xx = np.mgrid[y0:y1, x0:x1].astype(np.float32)
-    dx, dy = (xx + 0.5 - u) / r, (yy + 0.5 - v) / r
-    d2 = dx * dx + dy * dy
-    inside = d2 <= 1.0
-    if not inside.any():
-        return
-    nz = np.sqrt(np.clip(1 - d2, 0, 1))
-    n = np.stack([dx, -dy, -nz], axis=-1) @ R.T  # body-frame normal
-    w = 0.09 if r > 12 else 0.14  # thicker relative seams when small (they blur together)
-    seam = (np.abs(n[..., 0]) < w) | (np.abs(n[..., 1]) < w) | (np.abs(np.abs(n[..., 2]) - 0.62) < w * 0.8)
-    cap = np.abs(n[..., 0]) > 0.82
-    base = np.where(seam | cap, 38.0, 228.0)
-    shade = 0.62 + 0.38 * np.clip(-dy * 0.5 + nz * 0.8, 0, 1)
-    col = np.clip(base * shade, 0, 255)
-    alpha = np.clip((1.0 - np.sqrt(d2)) * r, 0, 1) * weight  # anti-aliased edge
-    region = acc if acc is not None else canvas
-    for ch, tint in enumerate((1.0, 1.0, 0.97)):
-        region[y0:y1, x0:x1, ch] = region[y0:y1, x0:x1, ch] * (1 - alpha) + col * tint * alpha
+    """Draw the user's ball (cream cloth, black stripes, black logo panels; see ball_texture.py)."""
+    ball_texture.draw(canvas, u, v, r, R, weight=weight, cloth_noise=0.0, target=acc)
 
 
 @dataclass

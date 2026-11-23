@@ -19,6 +19,7 @@ import json
 import math
 import os
 import time
+from collections import deque
 from dataclasses import dataclass, field
 
 import cv2
@@ -139,6 +140,9 @@ class BallModel:
     frame_w: int = 0
     frame_h: int = 0
     created_at: float = field(default_factory=time.time)
+    profile_name: str | None = None  # built-in profile merged in (see load_ball_model)
+    room_negatives: deque = field(default_factory=lambda: deque(maxlen=5000))  # learned live, not saved
+    room_negative_pos: deque = field(default_factory=lambda: deque(maxlen=5000))  # (x, y, r) of each
     _pos: np.ndarray | None = None
     _neg: np.ndarray | None = None
 
@@ -146,10 +150,37 @@ class BallModel:
     def calibrated(self) -> bool:
         return len(self.positives) >= 2
 
+    @property
+    def user_calibrated(self) -> bool:
+        """Samples from YOUR camera (ball calibration B), not only the built-in profile."""
+        return sum(1 for p in self.positives if not p.label.startswith("profile")) >= 2
+
     def _arrays(self) -> None:
         if self._pos is None:
             self._pos = np.array([p.features for p in self.positives], dtype=np.float32) if self.positives else np.zeros((0, 34), np.float32)
-            self._neg = np.array(self.negatives, dtype=np.float32) if self.negatives else np.zeros((0, 34), np.float32)
+        if self._neg is None:
+            neg = list(self.negatives) + list(self.room_negatives)
+            self._neg = np.array(neg, dtype=np.float32) if neg else np.zeros((0, 34), np.float32)
+
+    def add_room_negatives(self, feats: list, where: list | None = None) -> None:
+        self.room_negatives.extend(feats)
+        self.room_negative_pos.extend(where or [(-1e9, -1e9, 0.0)] * len(feats))
+        self._neg = None
+
+    def forget_room_near(self, x: float, y: float, r: float) -> int:
+        """The ball is here now: drop room patches learned at this spot (e.g. while the ball was
+        lying still before it was tracked), so the ball is not treated as background."""
+        if not self.room_negatives:
+            return 0
+        P = np.asarray(self.room_negative_pos, np.float32)
+        near = np.hypot(P[:, 0] - x, P[:, 1] - y) < (P[:, 2] + r) * 0.9
+        dropped = int(near.sum())
+        if dropped:
+            feats = list(self.room_negatives)
+            self.room_negatives = deque((f for f, n in zip(feats, near) if not n), maxlen=self.room_negatives.maxlen)
+            self.room_negative_pos = deque((tuple(p) for p, n in zip(P.tolist(), near) if not n), maxlen=self.room_negative_pos.maxlen)
+            self._neg = None
+        return dropped
 
     def score_features(self, f: np.ndarray) -> float:
         """0..1 'is this my ball' score: similarity to the best ball samples, relative to the
@@ -157,6 +188,12 @@ class BallModel:
         if not self.calibrated:
             return prior_score(f)
         self._arrays()
+        if len(self._neg) < 50:
+            # a profile alone, before anything of this room is known: every black-and-white
+            # thing resembles some view of the ball, so only trust close matches, capped by the
+            # generic prior
+            sp = float(np.sort(similarity_many(f, self._pos))[::-1][:2].mean())
+            return float(min(prior_score(f), np.clip((sp - 0.8) / 0.12, 0.0, 1.0)))
         pos = np.sort(similarity_many(f, self._pos))[::-1]
         sp = float(pos[:2].mean()) if len(pos) >= 2 else float(pos[0])
         sn = float(similarity_many(f, self._neg).max()) if len(self._neg) else 0.0
@@ -186,6 +223,13 @@ class BallModel:
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
         with open(path, "w", encoding="utf-8") as f:
             json.dump(self.to_dict(), f)
+
+    def merged_with_profile(self, profile: "BallModel", name: str | None) -> "BallModel":
+        """This model plus the positives of a built-in profile (your own samples come first)."""
+        m = BallModel(positives=list(self.positives) + [p for p in profile.positives if p.label.startswith("profile")],
+                      negatives=list(self.negatives), hoop_radius_px=self.hoop_radius_px,
+                      frame_w=self.frame_w, frame_h=self.frame_h, created_at=self.created_at, profile_name=name)
+        return m
 
     @staticmethod
     def load(path: str) -> "BallModel":
@@ -264,6 +308,106 @@ class BallModel:
                     break
         self._neg = None
         return added
+
+
+def load_ball_model(cfg: dict) -> BallModel:
+    """Your ball calibration (calibration_data/ball_model.json) plus the built-in profile of the
+    ball you use (config: ball.profile), so the ball is recognised even before calibration."""
+    from hoopconfig import resolve_path
+
+    model = BallModel.load(resolve_path(cfg["paths"]["ball_model"]))
+    bc = cfg.get("ball", {})
+    prof_path = bc.get("profile")
+    if not prof_path or not bc.get("use_profile", True):
+        return model
+    if model.user_calibrated and not bc.get("profile_with_calibration", True):
+        return model
+    path = resolve_path(prof_path)
+    if not os.path.exists(path):
+        print(f"[ball] profile not found: {path}")
+        return model
+    with open(path, "r", encoding="utf-8") as f:
+        name = json.load(f).get("profile", {}).get("name", os.path.basename(path))
+    return model.merged_with_profile(BallModel.load(path), name)
+
+
+class RoomLearner:
+    """The camera does not move, so everything that stays still in view is "not the ball".
+    While tracking runs, small batches of still patches (no motion, away from where the ball has
+    been) are added to the model as negatives: the dartboard, fan, cabinets and mirrors stop
+    looking like the ball within a few seconds. Costs ~3 ms per frame."""
+
+    def __init__(self, cfg: dict, model: BallModel):
+        bc = cfg.get("ball", {})
+        self.model = model
+        self.start_s = float(bc.get("room_learning_start_s", 1.5))
+        self.every_s = float(bc.get("room_learning_interval_s", 6.0))
+        self.per_frame = int(bc.get("room_learning_patches_per_frame", 6))
+        self.queue: list[tuple[float, float, float]] = []
+        self.t0: float | None = None
+        self.next_sweep = 0.0
+        self.recent_ball: deque = deque(maxlen=600)  # (t, x, y, r) of the tracked ball
+        self.sweeps = 0
+        self.rng = np.random.default_rng(0)
+
+    def reset(self) -> None:
+        self.queue.clear()
+        self.model.room_negatives.clear()
+        self.model._neg = None
+        self.t0 = None
+        self.sweeps = 0
+
+    def _plan(self, w: int, h: int, rim_r: float | None) -> None:
+        base = rim_r if rim_r and rim_r > 4 else w * 0.03
+        radii = sorted({int(max(8, base * k)) for k in (0.8, 1.3, 2.2, 3.6, 6.0)} | {int(min(h * 0.35, base * 9))})
+        pts = []
+        for r in radii:
+            step = max(6, int(r * 0.7))
+            ox, oy = self.rng.integers(0, step, 2)
+            for y in range(r + int(oy), h - r, step):
+                for x in range(r + int(ox), w - r, step):
+                    pts.append((float(x), float(y), float(r)))
+        self.rng.shuffle(pts)
+        self.queue = pts
+
+    def update(self, img: np.ndarray, fg_small: np.ndarray | None, t: float, track, rim_r: float | None) -> None:
+        if self.t0 is None:
+            self.t0 = t
+        if track is not None and track.observed:
+            if not self.recent_ball or t - self.recent_ball[-1][0] > 0.2:
+                self.model.forget_room_near(track.x, track.y, track.r)
+                self.recent_ball.append((t, track.x, track.y, track.r))
+        if t - self.t0 < self.start_s:
+            return
+        h, w = img.shape[:2]
+        if not self.queue:
+            if t < self.next_sweep:
+                return
+            self._plan(w, h, rim_r)
+            self.next_sweep = t + self.every_s
+            self.sweeps += 1
+        sc = fg_small.shape[1] / w if fg_small is not None else 1.0
+        added, where = [], []
+        for _ in range(min(self.per_frame, len(self.queue))):
+            x, y, r = self.queue.pop()
+            if fg_small is not None:
+                xs, ys, rs = int(x * sc), int(y * sc), max(1, int(r * sc))
+                win = fg_small[max(0, ys - rs) : ys + rs, max(0, xs - rs) : xs + rs]
+                if win.size and (win > 0).mean() > 0.01:
+                    continue  # something is moving here
+            # never learn the ball itself: skip where it was seen in the last minute
+            if any(t - bt_ < 60 and math.hypot(x - bx, y - by) < (r + br) * 1.2 for bt_, bx, by, br in self.recent_ball):
+                continue
+            p = extract_patch(img, x, y, r)
+            if p is None:
+                continue
+            f = features(p)
+            if f[_SC][2] < 0.01 and f[_SC][0] < 0.02:
+                continue  # blank wall
+            added.append(f.tolist())
+            where.append((x, y, r))
+        if added:
+            self.model.add_room_negatives(added, where)
 
 
 # ---------------------------------------------------------------------- calibration UI

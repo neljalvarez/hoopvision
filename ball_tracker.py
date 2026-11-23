@@ -120,10 +120,14 @@ class BallTracker:
         self.wt = cfg["detector"]["weights_track"]
         self.init_score = float(cfg["detector"]["init_score"])
         self.track_score = float(cfg["detector"]["track_score"])
+        self.min_motion_ev = float(cfg["detector"].get("track_min_motion_evidence", 0.25))
+        self.min_app_ev = float(cfg["detector"].get("track_min_appearance_evidence", 0.3))
+        self.big_jump_app = float(cfg["detector"].get("track_size_jump_min_appearance", 0.5))
         self.min_motion_init = float(cfg["detector"]["min_motion_for_init"])
         self.min_app_init = float(cfg["detector"].get("min_appearance_for_init", 0.2))
         self.track: Track | None = None
         self.tentative: list[Track] = []
+        self.frame_size: tuple[int, int] | None = None
         self.next_id = 1
         self.last_t: float | None = None
 
@@ -151,12 +155,28 @@ class BallTracker:
         return base * (0.6 + 0.4 * c.prior)
 
     def _track_score(self, tr: Track, c: Candidate, dt: float) -> float | None:
+        # a circle needs real evidence (it moves, or it looks like the ball): geometry alone is
+        # not enough — the ball's own stripes, panel and caps produce plenty of circles
+        if c.motion < self.min_motion_ev and c.appearance < self.min_app_ev and c.det < 0.3:
+            return None
         x, y = tr.kf.s[0], tr.kf.s[1]
         r_pred = math.exp(tr.log_r)
+        # predicted outside the image: the ball can only come back in through that edge
+        if self.frame_size is not None:
+            fw, fh = self.frame_size
+            m = 2.5 * max(r_pred, c.r)
+            if (y < -0.3 * r_pred and c.y > m) or (x < -r_pred and c.x > m) or (x > fw + r_pred and c.x < fw - m):
+                return None
+        # a sudden jump in size is usually the arm + ball blob at release, not the ball itself
+        if c.r > 1.2 * r_pred and c.appearance < self.big_jump_app:
+            return None
         # adaptive sizing: the allowed size change grows with elapsed time (ball flying away/closer)
         max_log = math.log(1 + float(self.cfg["radius_change_per_s"]) * max(dt, 1 / 60)) + 0.3
         dlog = abs(math.log(max(1e-3, c.r) / r_pred))
-        if dlog > max_log:
+        # at release the ball shrinks much faster than the filter expects; a candidate that both
+        # moves and clearly looks like the ball may be smaller than predicted
+        strong = c.appearance >= 0.5 and c.motion >= 0.6 and c.r < r_pred
+        if dlog > max_log + (0.25 if strong else 0.0):
             return None
         d = math.hypot(c.x - x, c.y - y)
         max_jump = float(self.cfg["max_speed_px_s"]) * max(dt, 1 / 60) + 2 * r_pred
@@ -166,11 +186,14 @@ class BallTracker:
             return None
         gate = math.exp(-0.5 * (min(m, 6.0) / 2.0) ** 2)
         size = math.exp(-((dlog / max(0.15, max_log * 0.6)) ** 2))
+        if strong:
+            size = max(size, 0.6)
         w = self.wt
         return w["appearance"] * c.appearance + w["motion"] * c.motion + w["shape"] * c.shape + w["detector"] * c.det + w["size"] * size + w["gate"] * gate
 
     # ------------------------------------------------------------------ update
     def update(self, t: float, cands: list[Candidate], frame_size: tuple[int, int] | None = None) -> TrackState | None:
+        self.frame_size = frame_size
         if self.last_t is not None and t <= self.last_t:
             return self.state(t)
         self.last_t = t
@@ -197,6 +220,9 @@ class BallTracker:
                 # coasting: the acceleration estimated during a release/bounce transient is not
                 # trustworthy for long extrapolations — decay it and cap the speed
                 tr.kf.s[4:6] *= 0.5
+                # the same for the size trend: an early wrong size estimate must not shrink (or
+                # grow) the predicted ball until the circle search no longer covers the real one
+                tr.log_r_vel *= 0.75
                 sp = math.hypot(tr.kf.s[2], tr.kf.s[3])
                 vmax = float(self.cfg["max_speed_px_s"]) * 0.5
                 if sp > vmax:
@@ -238,7 +264,7 @@ class BallTracker:
         tr.log_r += 0.6 * resid
         if dt > 1e-3:
             tr.log_r_vel += 0.35 * resid / dt
-            tr.log_r_vel = float(np.clip(tr.log_r_vel, -8, 8))
+            tr.log_r_vel = float(np.clip(tr.log_r_vel, -5, 5))
         tr.hits += 1
         tr.score_sum += score
         tr.last_seen = t

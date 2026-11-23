@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from ball_detector import BallDetector, DetectionResult
-from ball_model import BallModel
+from ball_model import BallModel, RoomLearner
 from ball_tracker import BallTracker, TrackState
 from calibration import CameraMotionMonitor, HoopCalibration, THUMB_H, THUMB_W
 from camera import Frame
@@ -34,6 +34,7 @@ class Pipeline:
         self.detector = BallDetector(cfg, self.ball_model, calibration)
         self.tracker = BallTracker(cfg)
         self.engine = ShotEngine(cfg, calibration, self.ball_model, self.detector)
+        self.room = RoomLearner(cfg, self.ball_model) if cfg.get("ball", {}).get("room_learning", True) else None
         self.motion: CameraMotionMonitor | None = None
         if calibration.reference_thumb:
             ref = np.array(calibration.reference_thumb, np.float32).reshape(THUMB_H, THUMB_W)
@@ -47,6 +48,8 @@ class Pipeline:
         self.engine.set_calibration(cal)
         self.tracker.reset()
         self.camera_moved = False
+        if self.room is not None:
+            self.room.reset()  # the view changed: relearn the room
         if cal.reference_thumb:
             self.motion = CameraMotionMonitor(np.array(cal.reference_thumb, np.float32).reshape(THUMB_H, THUMB_W))
 
@@ -57,6 +60,10 @@ class Pipeline:
         self.detector.rim_radius = self.engine.rim_radius()
         det = self.detector.process(frame.image, t, pred)
         track = self.tracker.update(t, det.candidates, (frame.image.shape[1], frame.image.shape[0]))
+        if self.room is not None and not self.camera_moved:
+            t_r = time.perf_counter()
+            self.room.update(frame.image, det.fg_small, t, track, self.engine.rim_radius())
+            det.timings_ms["room"] = (time.perf_counter() - t_r) * 1000
         if self.motion is not None and t - self._last_motion_check >= 1.0:
             self._last_motion_check = t
             self.camera_moved = self.motion.check(frame.image)
@@ -67,6 +74,11 @@ class Pipeline:
         else:
             self.engine.pause(False)
         return FrameResult(frame, track, det, events, (time.perf_counter() - t0) * 1000, self.camera_moved, det.timings_ms)
+
+    def set_ball_model(self, model: BallModel) -> None:
+        self.ball_model = self.detector.ball_model = self.engine.ball_model = model
+        if self.room is not None:
+            self.room = RoomLearner(self.cfg, model)
 
     def accept_view(self, image: np.ndarray) -> None:
         """User says the camera is fine: take the current view as the new reference."""

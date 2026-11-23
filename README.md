@@ -39,6 +39,7 @@ If the wrong camera opens, try `--camera 1` (menu option 8).
 
 ## 2. Camera placement
 
+* When you start the app, keep the ball in your hands or out of view for the first few seconds while the room is learned. The ball lying still in view would be learned as "room". It is forgotten again as soon as the ball is tracked there.
 * Mount the camera so it **does not move** (tripod, shelf). The whole rim, the whole net and some space below the net must be visible.
 * Your current spot, behind and above the shooter looking at the hoop, works. Placing it **a little to one side** (20–40°) gives better results. From straight behind, a ball that drops just in front of the rim looks almost identical to a make. See [Limitations](#limitations).
 * Use good, even light. Avoid strong backlight from a window behind the hoop.
@@ -63,12 +64,28 @@ If the camera gets bumped, HoopVision notices that the image shifted and shows a
 **C** to recalibrate; your previous points are pre-loaded, so it is usually a small drag.
 **K** keeps the current calibration if the warning is wrong.
 
-## 4. Calibrate the ball (press **B**, or start.bat → 4)
+## 4. Your ball (built-in profile) and ball calibration (press **B**, or start.bat → 4)
 
-This teaches the detector what *your* ball looks like, so it is not confused with the dartboard, a
-lamp or a round shadow. It is strongly recommended.
+HoopVision already knows your ball: the cream cloth "silent" basketball with black stripes
+and the black VEIDOORN / BASKETBALL logo panels. `models/ball_profiles/veidoorn_cream_black.json`
+holds 560 appearance samples of it:
 
-You do 7 short steps. For each: get into position → **SPACE** freezes the frame → drag a tight box
+* from the product photos, with simulated indoor light colours, exposure, motion blur and far-away sizes
+* from a 3-D model of the ball (`ball_texture.py`), rendered from every angle and spinning
+
+While tracking runs, HoopVision also learns what your room looks like (everything that stays
+still: dartboard, fan, cabinets, mirrors). Those stop looking like the ball within a few seconds
+of starting, and again after you recalibrate the hoop. So it works **without** calibration.
+
+Ball calibration with your own camera is still recommended. Your samples are added on top of
+the profile, and it captures your exact lighting and camera.
+
+For a different ball, build its profile from a few photos:
+`python tools/build_ball_profile.py --images photo1.jpg photo2.jpg --out models/ball_profiles/my_ball.json`.
+Then set `ball.profile` in `config.json`. The 3-D model in `ball_texture.py` describes this
+ball's pattern, so for a very different design add `--renders 0`.
+
+**Ball calibration (B):** 7 short steps. For each: get into position → **SPACE** freezes the frame → drag a tight box
 around the ball → **ENTER**.
 
 1. ball about **1 m** from the camera
@@ -168,6 +185,7 @@ Every threshold is in `config.json`; nothing is hidden in code. The most useful 
 | Symptom | Setting |
 |---|---|
 | ball not picked up / lost | `detector.init_score` (lower = easier, 0.4), `detector.track_score` (0.33); redo ball calibration |
+| something in the room keeps being taken for the ball | leave `ball.room_learning` on; mark it as an ignore region (I) during hoop calibration |
 | real shots not counted | `shot.away_rate_per_s` (1.4, lower = more sensitive), `shot.min_shrink_ratio` (0.85, higher = more sensitive) |
 | non-shots counted | `shot.confirm_shrink_ratio` (0.62, lower = stricter), `shot.away_rate_per_s` higher |
 | double counts | `shot.cooldown_s`, `shot.rearm_radius_factor` |
@@ -191,7 +209,8 @@ ball ([docs/DIAGNOSIS.md](docs/DIAGNOSIS.md)), so they are disabled by default.
 camera.py            newest-frame-only capture thread (no stale frames), real timestamps
 ball_detector.py     MOG2 motion blobs (full frame) + full-resolution hoop ROI every frame (upscaled when small)
                      + Hough circles inside blobs/near the prediction + optional ONNX model
-                     → candidates scored by appearance (ball_model.py), motion, shape, size;
+                     → candidates scored by appearance (ball_model.py: your ball's built-in profile
+                       + your calibration samples, vs. the room learned live), motion, shape, size;
                        static circles (dartboard) and ignore regions suppressed
 ball_tracker.py      constant-acceleration Kalman filter on centre, log-radius filter on size,
                      tentative tracks must be corroborated; coasting predictions kept separate from observations
@@ -203,6 +222,8 @@ outcome_classifier.py Shot Outcome Classifier: A→B crossing on observed segmen
 shot_engine.py       state machine IDLE → BALL_ACQUIRED → SHOT_RELEASED → BALL_APPROACHING_HOOP →
                      RIM_INTERACTION → AWAITING_OUTCOME → MADE / MISSED / UNCERTAIN → RESET; counters, undo
 calibration.py       hoop ellipse + zones UI, camera-moved detector
+ball_texture.py      3-D model of your ball's pattern (profile building + test renders)
+tools/build_ball_profile.py   builds models/ball_profiles/*.json from photos of a ball
 overlay.py audio.py session_log.py main.py
 ```
 
@@ -228,12 +249,19 @@ tracker and engine pipeline. These tests check behaviour (swishes, rim-ins, fron
 misses, airballs, holding, dribbling, catching, pump fakes, retrieval, consecutive shots,
 `main.py --video --headless`). They are **not** a measurement of real-world accuracy.
 
-`python tests/random_sweep.py --seed 3 --n 36` runs randomly aimed shots through the same
-pipeline. On the last run (144 shots, seeds 3/7/11/19):
+`python tests/random_sweep.py --seed 3 --n 30 [--ball profile]` runs randomly aimed shots through the
+same pipeline, with the simulated ball drawn in your ball's pattern (cream with black stripes and
+logo panels). On the last run (90 shots):
 
-* every attempt was detected, and nothing was counted twice
-* 138 were classified correctly
-* 5 were reported as uncertain: mostly long rolls around the rim and front-rim drops
-* 1 was called a make where the simulation said miss. In that one the ball was still wedged in the rim when the clip ended.
+| Setup | Correct | Uncertain | Not detected | Wrong call |
+|---|---|---|---|---|
+| built-in profile only, no calibration (two seeds, 60 shots) | 58 | 1 (long roll on the rim) | 1 | 0 |
+| ball calibration + profile (30 shots) | 30 | 0 | 0 | 0 |
+
+The built-in profile was also checked against your real room photo. That photo was not used to
+build the profile. Your ball scores 0.24–0.41, including rotated, motion-blurred and
+far-away views. After room learning, 99% of random room patches score below 0.19, where
+the old generic rule scored 90% of the room as "ball". See
+`tests/test_ball_model.py::test_profile_recognises_the_real_ball_in_the_room_photo_without_calibration`.
 
 Again: synthetic video, your real footage will be harder.
