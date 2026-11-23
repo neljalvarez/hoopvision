@@ -56,6 +56,8 @@ class Prediction:
     y: float
     r: float
     search: float  # search radius in px
+    vx: float = 0.0  # predicted velocity (px/s), used to recognise motion-blur streaks
+    vy: float = 0.0
 
 
 @dataclass
@@ -177,6 +179,8 @@ class BallDetector:
         # 1) moving blobs in the whole frame
         t1 = time.perf_counter()
         cands += self._blob_candidates(fg, 1.0 / sc, "motion", gray, pred)
+        if pred is not None:
+            cands += self._joined_near(fg, 1.0 / sc, pred)
         timings["blobs"] = (time.perf_counter() - t1) * 1000
 
         # 2) full-resolution hoop region, every frame
@@ -270,6 +274,10 @@ class BallDetector:
             if fill >= float(cfg["motion_min_fill"]) and aspect <= float(cfg["max_blob_aspect"]):
                 shape = float(np.clip(0.5 * (fill - 0.35) / 0.5 + 0.5 * (circ - 0.5) / 0.4, 0, 1))
                 out.append(Candidate(X, Y, R, source, motion=0.0, shape=shape))
+            elif pred is not None and aspect <= float(cfg.get("max_streak_aspect", 6.0)):
+                st = self._streak(cnt, scale, offset, pred, rw, rh, area)
+                if st is not None:
+                    out.append(st)
             # a large irregular blob can be "arm + ball": look for the ball inside it
             if R > 25 and (fill < 0.6 or aspect > 1.4):
                 bx, by, bw, bh = cv2.boundingRect(cnt)
@@ -282,6 +290,57 @@ class BallDetector:
                 for c in self._hough(gray, (rx0, ry0, rw_, rh_), rmin, rmax, "blob-hough", max_n=2):
                     out.append(c)
         return out
+
+    def _joined_near(self, fg: np.ndarray, scale: float, pred: Prediction) -> list[Candidate]:
+        """A white ball against the white wall is segmented as scattered pieces (mostly its black
+        seams), worse when it is blurred. Around the predicted position, join the pieces at the
+        predicted ball size and take the joined region as a candidate."""
+        H, W = fg.shape
+        half = (pred.search + pred.r) / scale
+        x0, y0 = int(max(0, pred.x / scale - half)), int(max(0, pred.y / scale - half))
+        x1, y1 = int(min(W, pred.x / scale + half)), int(min(H, pred.y / scale + half))
+        if x1 - x0 < 6 or y1 - y0 < 6:
+            return []
+        rp = pred.r / scale
+        k = int(max(3, min(61, rp * 0.7))) | 1
+        crop = cv2.morphologyEx(fg[y0:y1, x0:x1], cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k)))
+        out: list[Candidate] = []
+        contours, _ = cv2.findContours(crop, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        for cnt in contours:
+            area = cv2.contourArea(cnt)
+            if area < 0.25 * math.pi * rp * rp:
+                continue
+            (x, y), r = cv2.minEnclosingCircle(cnt)
+            R = r * scale
+            if 0.6 * pred.r <= R <= 1.5 * pred.r and area >= 0.35 * math.pi * r * r:
+                fill = min(1.0, area / (math.pi * r * r))
+                out.append(Candidate((x + x0) * scale, (y + y0) * scale, R, "joined", motion=fill, shape=0.45))
+            else:
+                (_, _), (rw, rh), _ = cv2.minAreaRect(cnt)
+                st = self._streak(cnt, scale, (x0 * scale, y0 * scale), pred, rw, rh, area)
+                if st is not None:
+                    st.source = "joined-streak"
+                    out.append(st)
+        return out
+
+    @staticmethod
+    def _streak(cnt, scale: float, offset, pred: "Prediction", rw: float, rh: float, area: float) -> "Candidate | None":
+        """A fast ball is smeared into a capsule along its direction of travel (motion blur). Its
+        width is the ball's diameter and its centre is the ball's mid-exposure position."""
+        speed = math.hypot(pred.vx, pred.vy)
+        if speed < 4 * pred.r or rw * rh <= 0:  # needs a clearly moving track (> 2 diameters/s)
+            return None
+        m = cv2.moments(cnt)
+        if m["m00"] <= 0:
+            return None
+        theta = 0.5 * math.atan2(2 * m["mu11"], m["mu20"] - m["mu02"])  # major axis direction
+        cos = abs(math.cos(theta) * pred.vx + math.sin(theta) * pred.vy) / speed
+        rect_fill = area / (rw * rh)
+        r = 0.5 * min(rw, rh) * scale
+        if cos < 0.85 or rect_fill < 0.55 or not (0.6 * pred.r <= r <= 1.4 * pred.r):
+            return None
+        x, y = m["m10"] / m["m00"] * scale + offset[0], m["m01"] / m["m00"] * scale + offset[1]
+        return Candidate(x, y, r, "streak", shape=0.5)
 
     def _hoop_candidates(self, hoop_fg: np.ndarray, gray: np.ndarray, pred: Prediction | None, offset) -> list[Candidate]:
         """Near the rim the ball has a known apparent size. A white ball on a white wall often
@@ -352,7 +411,7 @@ class BallDetector:
     def _merge(cands: list[Candidate]) -> list[Candidate]:
         """Merge candidates from different sources that describe the same circle."""
         out: list[Candidate] = []
-        priority = {"hoop-hough": 0, "hoop-joined": 1, "hoop": 2, "motion": 3, "onnx": 4, "blob-hough": 5, "hough": 6}
+        priority = {"streak": 7, "joined": 8, "joined-streak": 8, "hoop-hough": 0, "hoop-joined": 1, "hoop": 2, "motion": 3, "onnx": 4, "blob-hough": 5, "hough": 6}
         for c in sorted(cands, key=lambda c: priority.get(c.source, 9)):
             for o in out:
                 # merge only circles of similar size: when sources disagree on the size, keep both
@@ -360,6 +419,7 @@ class BallDetector:
                 if math.hypot(c.x - o.x, c.y - o.y) < 0.6 * max(c.r, o.r) and 0.77 < c.r / max(1e-6, o.r) < 1.3:
                     o.shape = max(o.shape, c.shape)
                     o.det = max(o.det, c.det)
+                    o.motion = max(o.motion, c.motion)
                     if c.source not in o.source:
                         o.source += "+" + c.source
                     break

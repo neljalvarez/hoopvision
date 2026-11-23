@@ -62,15 +62,17 @@ def run(sims, cfg_overrides: dict | None = None, fps: float = 30.0, warmup_s: fl
         img = np.clip(bg.astype(np.float32) + rng.normal(0, 2.5, bg.shape), 0, 255).astype(np.uint8)
         pipe.process(Frame(img, -warmup_s + k / fps, idx))
         idx += 1
+    last_img = bg
     for t, img in synth.render_video(sims, fps=fps, seed=seed, duration=duration, **render_kw):
+        last_img = img
         res = pipe.process(Frame(img, t, idx))
         idx += 1
         events.extend(res.events)
         results.append(res)
-    # let pending shots resolve
+    # let pending shots resolve: the scene stays as it was (the ball lies where it stopped)
     t_last = results[-1].frame.t if results else 0.0
     for k in range(1, int(5 * fps)):
-        img = np.clip(bg.astype(np.float32) + rng.normal(0, 2.5, bg.shape), 0, 255).astype(np.uint8)
+        img = np.clip(last_img.astype(np.float32) + rng.normal(0, 2.5, bg.shape), 0, 255).astype(np.uint8)
         res = pipe.process(Frame(img, t_last + k / fps, idx))
         idx += 1
         events.extend(res.events)

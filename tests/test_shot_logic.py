@@ -22,8 +22,8 @@ def engine():
 class Feed:
     """Feeds an engine with a TrackState per frame from a list of (x, y, r) or None (hidden)."""
 
-    def __init__(self, eng: ShotEngine, fps: float = 30.0):
-        self.eng, self.dt, self.t, self.hist, self.events = eng, 1 / fps, 0.0, [], []
+    def __init__(self, eng: ShotEngine, fps: float = 30.0, source: str = "test"):
+        self.eng, self.dt, self.t, self.hist, self.events, self.source = eng, 1 / fps, 0.0, [], [], source
 
     def run(self, pts):
         for p in pts:
@@ -32,7 +32,7 @@ class Feed:
                 st = None if not self.hist else TrackState(1, self.t, self.hist[-1].x, self.hist[-1].y, self.hist[-1].r, 0, 0, 0, 0, 0, 0.3, False, 0.1, list(self.hist))
             else:
                 x, y, r = p
-                self.hist.append(TrackPoint(self.t, x, y, r, True, 0.8, "test"))
+                self.hist.append(TrackPoint(self.t, x, y, r, True, 0.8, self.source))
                 vx = (x - self.hist[-2].x) / self.dt if len(self.hist) > 1 else 0
                 vy = (y - self.hist[-2].y) / self.dt if len(self.hist) > 1 else 0
                 st = TrackState(1, self.t, x, y, r, vx, vy, 0, 0, 0, 0.8, True, 0.0, list(self.hist[-120:]))
@@ -43,6 +43,15 @@ class Feed:
         """The ball left view and a new track starts (as the tracker would do after a gap)."""
         self.run([None] * 30)
         self.hist = []
+        return self
+
+    def coast(self, pts):
+        """Predicted (unobserved) positions, e.g. a track extrapolated out of the frame."""
+        for x, y, r in pts:
+            self.t += self.dt
+            self.hist.append(TrackPoint(self.t, x, y, r, False))
+            st = TrackState(1, self.t, x, y, r, 0, -3000, 0, 0, 0, 0.4, False, 0.0, list(self.hist[-120:]))
+            self.events += self.eng.update(self.t, st)
         return self
 
     def idle(self, n=90):
@@ -183,3 +192,28 @@ def test_state_machine_passes_through_named_states():
     states = [e["state"] for e in f.events if e["type"] == "state"]
     for s in (State.BALL_ACQUIRED, State.SHOT_RELEASED, State.MADE, State.RESET):
         assert s.value in states, states
+
+
+def test_fast_throw_out_of_the_top_of_the_frame_is_an_attempt():
+    up = [(600 - 5 * i, 520 - 135 * i, 118 - 2 * i) for i in range(1, 5)]  # leaves the image in 4 frames
+    f = Feed(engine()).run(hold(30) + up).coast([(580, -60 - 130 * i, 105) for i in range(1, 6)]).idle()
+    assert len(f.attempts) == 1 and f.attempts[0]["kind"] == "top-exit"
+    assert f.outcomes in (["miss"], ["uncertain"])  # never seen again: not a make
+
+
+def test_ball_lifted_slowly_out_of_the_top_is_not_an_attempt():
+    up = [(620, 540 - 25 * i, 120) for i in range(1, 25)]
+    f = Feed(engine()).run(hold(30) + up).coast([(620, -70 - 25 * i, 120) for i in range(1, 6)]).idle()
+    assert f.attempts == []
+
+
+def test_rebound_off_the_floor_toward_the_rim_is_not_an_attempt():
+    fall = [(470, 250 + 60 * i, 40) for i in range(1, 8)]
+    rise = [(475, 640 - 70 * i, 39) for i in range(1, 7)]
+    f = Feed(engine()).run(fall + rise).idle()
+    assert f.attempts == []
+
+
+def test_positions_without_any_motion_evidence_do_not_start_an_attempt():
+    f = Feed(engine(), source="hough").run(hold(30) + flight_to((480, 60), n=12)).idle()
+    assert f.attempts == []

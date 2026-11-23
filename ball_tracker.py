@@ -142,7 +142,7 @@ class BallTracker:
         r = math.exp(tr.log_r + tr.log_r_vel * dt)
         speed = math.hypot(tr.kf.s[2], tr.kf.s[3])
         search = max(2.5 * r, 3.0 * tr.kf.pos_std(), speed * dt * 1.5 + 2 * r)
-        return Prediction(x, y, r, min(search, 4 * r + 400))
+        return Prediction(x, y, r, min(search, 4 * r + 400), float(tr.kf.s[2]), float(tr.kf.s[3]))
 
     # ------------------------------------------------------------------ scoring
     def init_score_of(self, c: Candidate) -> float:

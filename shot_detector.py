@@ -50,6 +50,7 @@ class ShotAttemptDetector:
         self.pending: AttemptSignal | None = None
         self.pending_r0 = 0.0
         self.pending_rmin = 0.0
+        self._top_checked: int | None = None
 
     def set_ellipse(self, e: Ellipse) -> None:
         self.e = e
@@ -94,15 +95,28 @@ class ShotAttemptDetector:
         if self.pending is not None:
             return self._follow_pending(st, t, frame_size)
         if not st.observed:
-            return None
-        pts = [p for p in st.history if p.observed and t - p.t <= float(cfg["max_window_s"])]
+            return self._left_through_top(st, t, frame_size)
+        self._top_checked = None
+        recent = [p for p in st.history if t - p.t <= float(cfg["max_window_s"])]
+        pts = [p for p in recent if p.observed]
         n_min = int(cfg["min_window_obs"])
         if len(pts) < n_min:
             return None
         # check the most recent stretches separately: a ball held still before the throw must not
         # dilute the release (shortest suffix first so the release is detected as early as possible)
+        min_frac = float(cfg.get("min_window_obs_fraction", 0.5))
         for k in range(n_min, len(pts) + 1):
+            # a release is seen clearly (the ball is big and close): a track that is mostly
+            # coasting through the window (sparse, jumpy observations) cannot start an attempt
+            span = [p for p in recent if p.t >= pts[-k].t]
+            if len(pts[-k:]) < min_frac * len(span):
+                continue
+            if not self._moving_evidence(pts[-k:]):
+                continue
             sig = self.evaluate(pts[-k:], t)
+            if sig is not None and sig.kind == "2d" and self._bounced_before(st, pts[-k].t):
+                self.last_reason = "rising after a bounce (rebound), not a release"
+                continue
             if sig is not None:
                 if sig.kind == "2d":
                     return sig  # side-on view: already travelling toward the rim
@@ -134,6 +148,56 @@ class ShotAttemptDetector:
             fw, fh = frame_size
             if st.y < -0.3 * st.r or st.x < -st.r or st.x > fw + st.r:
                 return self._confirm("ball left the frame on its way up", t)
+        return None
+
+    @staticmethod
+    def _moving_evidence(pts) -> bool:
+        """A thrown ball shows up in the motion masks. Positions found only by a circle search
+        around the prediction (no motion at all) can drift onto texture and fake a 'flight'."""
+        moving = sum(1 for p in pts if p.source and p.source != "hough")
+        return moving >= max(2, (len(pts) + 1) // 2)
+
+    def _bounced_before(self, st: TrackState, t0: float) -> bool:
+        """The ball was falling fast just before it started rising: a floor/rim rebound."""
+        W = 2 * self.e.a
+        before = [p for p in st.history if p.observed and t0 - 0.4 <= p.t <= t0]
+        for a, b in zip(before, before[1:]):
+            if b.t > a.t and (b.y - a.y) / (b.t - a.t) > float(self.cfg.get("rebound_fall_speed_rim_w_s", 4.0)) * W:
+                return True
+        return False
+
+    def _left_through_top(self, st: TrackState, t: float, frame_size) -> AttemptSignal | None:
+        """A fast, high release often leaves the top of the frame within 2-4 frames, too soon for
+        the shrink to be measured reliably (the ball is cut off by the image edge). Count it when
+        the ball was released from the hands (large), rose steadily and fast, did not grow, and
+        the track then went out through the top of the frame roughly above the hoop."""
+        if frame_size is None or getattr(self, "_top_checked", None) == st.id:
+            return None
+        fw, fh = frame_size
+        if st.y > -0.3 * st.r:
+            return None
+        self._top_checked = st.id  # evaluate once per track
+        cfg = self.cfg
+        W = 2 * self.e.a
+        obs = [p for p in st.history if p.observed and t - p.t <= float(cfg.get("top_exit_window_s", 0.5))]
+        if len(obs) < 3 or not self._moving_evidence(obs[-3:]):
+            return None
+        last3 = obs[-3:]
+        dt = last3[-1].t - last3[0].t
+        if dt <= 0:
+            return None
+        rising = all(b.y < a.y - 0.05 * W for a, b in zip(last3, last3[1:]))
+        vy = (last3[-1].y - last3[0].y) / dt
+        r_start = max(p.r for p in obs)
+        no_growth = last3[-1].r <= 1.1 * min(p.r for p in last3[:-1]) and last3[-1].r <= 1.12 * last3[0].r
+        from_hands = r_start >= float(cfg["rearm_radius_factor"]) * self.rim_r()
+        above_hoop = abs(st.x - self.e.cx) <= float(cfg.get("top_exit_max_offset_frac", 0.35)) * fw
+        fast = -vy / W >= float(cfg.get("top_exit_min_speed_rim_widths_s", 8.0))
+        feats = {"rise_speed_rim_w_s": round(float(-vy / W), 1), "r_start": round(float(r_start), 1), "r_last": round(float(last3[-1].r), 1),
+                 "exit_x_offset_frac": round(float((st.x - self.e.cx) / fw), 2)}
+        if rising and fast and no_growth and from_hands and above_hoop:
+            return AttemptSignal(obs[0].t, t, "top-exit", [f"Ball thrown up out of the top of the frame toward the hoop ({-vy / W:.0f} rim-widths/s)"], feats, list(obs))
+        self.last_reason = f"left through the top but not like a shot: {feats}"
         return None
 
     def _confirm(self, why: str, t: float) -> AttemptSignal:

@@ -269,11 +269,13 @@ class ShotOutcomeClassifier:
         in slowly, or one dropping just in front of the rim) only the ball's size can tell the
         two apart: in front of the rim it is closer to the camera, so bigger."""
         cfg = self.cfg
-        if fall is not None and fall < float(cfg.get("free_fall_ratio", 0.9)):
-            return "through"
         d = self._depth_median(c)
         if d <= float(cfg.get("front_size_ratio", 1.06)):
             return "through"
+        if fall is not None and fall < float(cfg.get("free_fall_ratio", 0.9)):
+            # slowed, but bigger than a ball at the rim: a ball knocked forward off the back rim
+            # also loses vertical speed. Size and fall disagree, so don't guess.
+            return "ambiguous"
         if d <= float(cfg.get("front_size_ratio_hard", 1.12)) or fall is None:
             return "ambiguous"
         return "front"

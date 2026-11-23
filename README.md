@@ -116,8 +116,8 @@ pops up with a sound.
 
 ### What counts as a shot
 
-* **Attempt:** the ball leaves your hands toward the hoop. With this camera that shows up as the ball shrinking quickly as it flies away and moving toward or up to the rim. An attempt does **not** need to reach the hoop, so airballs count.
-* **Not counted:** holding, dribbling, catching, moving the ball around in front of the camera, picking it up, and rebounds under the hoop. A pump fake (the ball goes up a little and comes back) is cancelled.
+* **Attempt:** the ball leaves your hands toward the hoop. With this camera that shows up as the ball shrinking quickly as it flies away and moving toward or up to the rim, or a fast throw straight out of the top of the frame above the hoop. An attempt does **not** need to reach the hoop, so airballs count.
+* **Not counted:** holding, dribbling, catching, moving the ball around in front of the camera, picking it up, and rebounds (a ball rising right after a fast fall). A pump fake (the ball goes up a little and comes back) is cancelled.
 * **Made:** the ball comes from zone A, crosses the opening (checked on the line between two real observations, so fast drops between frames are caught) at a size consistent with being at the rim's depth, and then continues down into the net without bouncing back toward the camera. Net motion is supporting evidence only.
 * **Missed:** the ball falls outside the rim, bounces away, comes back toward you, or drops short (airball). Rim bounces are given time to resolve; a ball that rattles and then drops in is a make.
 * **Uncertain:** the ball vanishes without enough evidence, or the depth evidence is ambiguous (typical: a ball dropping just in front of the rim). Uncertain is never silently turned into a make or miss.
@@ -227,3 +227,13 @@ sensor noise and real rim/backboard/net physics. That video goes through the ful
 tracker and engine pipeline. These tests check behaviour (swishes, rim-ins, front/side/long
 misses, airballs, holding, dribbling, catching, pump fakes, retrieval, consecutive shots,
 `main.py --video --headless`). They are **not** a measurement of real-world accuracy.
+
+`python tests/random_sweep.py --seed 3 --n 36` runs randomly aimed shots through the same
+pipeline. On the last run (144 shots, seeds 3/7/11/19):
+
+* every attempt was detected, and nothing was counted twice
+* 138 were classified correctly
+* 5 were reported as uncertain: mostly long rolls around the rim and front-rim drops
+* 1 was called a make where the simulation said miss. In that one the ball was still wedged in the rim when the clip ended.
+
+Again: synthetic video, your real footage will be harder.
